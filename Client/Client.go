@@ -86,10 +86,17 @@ func copyLoop(conn, remote net.Conn) {
 		wg.Done()
 	}()
 
-	//FALTA LIMPAR O HEADER QUE VEM COM OS MEUS PACOTES
 	go func() {
-		io.Copy(conn, remote)
-		wg.Done()
+		for {
+			buffer := make([]byte, data_size)
+			_, err := conn.Read(buffer)
+			if err != nil {
+				break
+			}
+			data_len := binary.BigEndian.Uint64([]byte{buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5],
+				buffer[6], buffer[7]})
+			conn.Write(buffer[header_size : data_len+header_size])
+		}
 	}()
 
 	wg.Wait()
