@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net"
 	"os"
@@ -19,13 +18,13 @@ var ptInfo pt.ClientInfo
 
 var handlerChan = make(chan int)
 
-var queue = make(chan []byte, 2)
-
 const time_value = 1
 const data_size = 512
 const header_size = 8
 
 func copyLoop(conn, remote net.Conn) {
+	var queue = make(chan []byte, 2)
+
 	var wg sync.WaitGroup
 	wg.Add(3)
 
@@ -87,6 +86,7 @@ func copyLoop(conn, remote net.Conn) {
 		wg.Done()
 	}()
 
+	//FALTA LIMPAR O HEADER QUE VEM COM OS MEUS PACOTES
 	go func() {
 		io.Copy(conn, remote)
 		wg.Done()
@@ -170,7 +170,7 @@ func main() {
 
 	if os.Getenv("TOR_PT_EXIT_ON_STDIN_CLOSE") == "1" {
 		go func() {
-			io.Copy(ioutil.Discard, os.Stdin)
+			io.Copy(io.Discard, os.Stdin)
 			sigChan <- syscall.SIGTERM
 		}()
 	}

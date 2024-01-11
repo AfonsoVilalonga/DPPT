@@ -3,12 +3,16 @@ package main
 //jsd
 
 import (
+	"encoding/binary"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	pt "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib"
 )
@@ -17,11 +21,81 @@ var ptInfo pt.ServerInfo
 
 var handlerChan = make(chan int)
 
+const time_value = 1
+const data_size = 512
+const header_size = 8
+
 func copyLoop(conn, or net.Conn) {
+	var queue = make(chan []byte, 2)
 
-	for {
+	var wg sync.WaitGroup
+	wg.Add(3)
 
-	}
+	go func() {
+		for {
+			buffer := make([]byte, data_size)
+			n, err := or.Read(buffer)
+			if err != nil {
+				break
+			}
+
+			bytes := make([]byte, 8)
+			binary.BigEndian.PutUint64(bytes, uint64(n))
+			buffer = append(bytes, buffer...)
+
+			queue <- buffer
+		}
+		wg.Done()
+	}()
+
+	go func() {
+	ForLoop:
+		for {
+			time.Sleep(time_value * time.Second)
+
+			result := rand.Intn(6)
+			send := false
+
+			if result == 0 {
+				send = true
+			} else if result == 5 {
+				send = false
+			} else {
+				result := rand.Intn(2)
+				if result == 0 {
+					send = true
+				} else {
+					send = false
+				}
+			}
+
+			select {
+			case data, ok := <-queue:
+				if !ok {
+					break ForLoop
+				}
+				if send {
+					conn.Write(data)
+				} else {
+					buffer := make([]byte, data_size+header_size)
+					conn.Write(buffer)
+				}
+
+			default:
+				buffer := make([]byte, data_size+header_size)
+				conn.Write(buffer)
+			}
+		}
+		wg.Done()
+	}()
+
+	//FALTA LIMPAR O HEADER QUE VEM COM OS MEUS PACOTES
+	go func() {
+		io.Copy(conn, or)
+		wg.Done()
+	}()
+
+	wg.Wait()
 }
 
 func handler(conn net.Conn) error {
