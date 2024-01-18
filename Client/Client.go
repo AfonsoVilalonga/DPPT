@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/knadh/chunkedreader"
 	pt "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib"
 )
 
@@ -18,12 +19,36 @@ var ptInfo pt.ClientInfo
 
 var handlerChan = make(chan int)
 
+// PARAMETERS
 const time_value = 1
-const data_size = 512
+const data_size = 1024
+const time_metric = time.Microsecond
+
 const header_size = 8
 
+func randomizeResp() bool {
+	rand.Seed(time.Now().Unix())
+	result := rand.Intn(6)
+	send := false
+
+	if result == 0 {
+		send = true
+	} else if result == 5 {
+		send = false
+	} else {
+		result := rand.Intn(2)
+		if result == 0 {
+			send = true
+		} else {
+			send = false
+		}
+	}
+
+	return send
+}
+
 func copyLoop(conn, remote net.Conn) {
-	var queue = make(chan []byte, 2)
+	var queue = make(chan []byte, 1000)
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -48,55 +73,40 @@ func copyLoop(conn, remote net.Conn) {
 	go func() {
 	ForLoop:
 		for {
-			time.Sleep(time_value * time.Second)
+			time.Sleep(time_value * time_metric)
 
-			result := rand.Intn(6)
-			send := false
-
-			if result == 0 {
-				send = true
-			} else if result == 5 {
-				send = false
-			} else {
-				result := rand.Intn(2)
-				if result == 0 {
-					send = true
-				} else {
-					send = false
-				}
-			}
-
-			select {
-			case data, ok := <-queue:
-				if !ok {
-					break ForLoop
-				}
-				if send {
+			if randomizeResp() {
+				select {
+				case data, ok := <-queue:
+					if !ok {
+						break ForLoop
+					}
 					remote.Write(data)
-				} else {
+				default:
 					buffer := make([]byte, data_size+header_size)
 					remote.Write(buffer)
 				}
-
-			default:
+			} else {
 				buffer := make([]byte, data_size+header_size)
 				remote.Write(buffer)
 			}
+
 		}
 		wg.Done()
 	}()
 
 	go func() {
-		for {
-			buffer := make([]byte, data_size)
-			_, err := conn.Read(buffer)
-			if err != nil {
-				break
+		ch := chunkedreader.New(remote, header_size+data_size)
+		for ch.Read() {
+			ms := ch.Bytes()
+
+			lD_a := ms[0:header_size]
+			lD := binary.BigEndian.Uint64(lD_a)
+			if lD > 0 {
+				conn.Write(ms[header_size : lD+header_size])
 			}
-			data_len := binary.BigEndian.Uint64([]byte{buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5],
-				buffer[6], buffer[7]})
-			conn.Write(buffer[header_size : data_len+header_size])
 		}
+		wg.Done()
 	}()
 
 	wg.Wait()
