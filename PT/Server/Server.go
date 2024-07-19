@@ -1,8 +1,12 @@
 package main
 
+//jsd
+
 import (
 	"encoding/binary"
 	"io"
+	"io/ioutil"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -15,40 +19,32 @@ import (
 	pt "gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib"
 )
 
-var ptInfo pt.ClientInfo
+var ptInfo pt.ServerInfo
 
 var handlerChan = make(chan int)
 
 // PARAMETERS
 const time_value = 1
 const data_size = 1024
-const time_metric = time.Microsecond
+const time_metric = time.Nanosecond
+const epsilon = 0.1
 
 const header_size = 8
 
 func randomizeResp() bool {
-	rand.Seed(time.Now().Unix())
-	result := rand.Intn(6)
-	send := false
+	expEpsilon := math.Exp(epsilon)
+	p := (expEpsilon / (expEpsilon + 1))
+	randValue := rand.Float64()
 
-	if result == 0 {
-		send = true
-	} else if result == 5 {
-		send = false
+	if randValue <= p {
+		return true
 	} else {
-		result := rand.Intn(2)
-		if result == 0 {
-			send = true
-		} else {
-			send = false
-		}
+		return false
 	}
-
-	return send
 }
 
-func copyLoop(conn, remote net.Conn) {
-	var queue = make(chan []byte, 1000)
+func copyLoop(conn, or net.Conn) {
+	var queue = make(chan []byte, 2)
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -56,7 +52,7 @@ func copyLoop(conn, remote net.Conn) {
 	go func() {
 		for {
 			buffer := make([]byte, data_size)
-			n, err := conn.Read(buffer)
+			n, err := or.Read(buffer)
 			if err != nil {
 				break
 			}
@@ -81,29 +77,28 @@ func copyLoop(conn, remote net.Conn) {
 					if !ok {
 						break ForLoop
 					}
-					remote.Write(data)
+					conn.Write(data)
 				default:
 					buffer := make([]byte, data_size+header_size)
-					remote.Write(buffer)
+					conn.Write(buffer)
 				}
 			} else {
 				buffer := make([]byte, data_size+header_size)
-				remote.Write(buffer)
+				conn.Write(buffer)
 			}
-
 		}
 		wg.Done()
 	}()
 
 	go func() {
-		ch := chunkedreader.New(remote, header_size+data_size)
+		ch := chunkedreader.New(conn, header_size+data_size)
 		for ch.Read() {
 			ms := ch.Bytes()
 
 			lD_a := ms[0:header_size]
 			lD := binary.BigEndian.Uint64(lD_a)
 			if lD > 0 {
-				conn.Write(ms[header_size : lD+header_size])
+				or.Write(ms[header_size : lD+header_size])
 			}
 		}
 		wg.Done()
@@ -112,33 +107,29 @@ func copyLoop(conn, remote net.Conn) {
 	wg.Wait()
 }
 
-func handler(conn *pt.SocksConn) error {
+func handler(conn net.Conn) error {
+	defer conn.Close()
+
 	handlerChan <- 1
 	defer func() {
 		handlerChan <- -1
 	}()
 
-	defer conn.Close()
-	remote, err := net.Dial("tcp", conn.Req.Target)
-	if err != nil {
-		conn.Reject()
-		return err
-	}
-	defer remote.Close()
-	err = conn.Grant(remote.RemoteAddr().(*net.TCPAddr))
+	or, err := pt.DialOr(&ptInfo, conn.RemoteAddr().String(), "dummy")
 	if err != nil {
 		return err
 	}
+	defer or.Close()
 
-	copyLoop(conn, remote)
+	copyLoop(conn, or)
 
 	return nil
 }
 
-func acceptLoop(ln *pt.SocksListener) error {
+func acceptLoop(ln net.Listener) error {
 	defer ln.Close()
 	for {
-		conn, err := ln.AcceptSocks()
+		conn, err := ln.Accept()
 		if err != nil {
 			if e, ok := err.(net.Error); ok && e.Temporary() {
 				continue
@@ -152,33 +143,28 @@ func acceptLoop(ln *pt.SocksListener) error {
 func main() {
 	var err error
 
-	ptInfo, err = pt.ClientSetup(nil)
+	ptInfo, err = pt.ServerSetup(nil)
 	if err != nil {
 		os.Exit(1)
 	}
 
-	if ptInfo.ProxyURL != nil {
-		pt.ProxyError("proxy is not supported")
-		os.Exit(1)
-	}
-
 	listeners := make([]net.Listener, 0)
-	for _, methodName := range ptInfo.MethodNames {
-		switch methodName {
+	for _, bindaddr := range ptInfo.Bindaddrs {
+		switch bindaddr.MethodName {
 		case "dummy":
-			ln, err := pt.ListenSocks("tcp", "127.0.0.1:0")
+			ln, err := net.ListenTCP("tcp", bindaddr.Addr)
 			if err != nil {
-				pt.CmethodError(methodName, err.Error())
+				pt.SmethodError(bindaddr.MethodName, err.Error())
 				break
 			}
 			go acceptLoop(ln)
-			pt.Cmethod(methodName, ln.Version(), ln.Addr())
+			pt.Smethod(bindaddr.MethodName, ln.Addr())
 			listeners = append(listeners, ln)
 		default:
-			pt.CmethodError(methodName, "no such method")
+			pt.SmethodError(bindaddr.MethodName, "no such method")
 		}
 	}
-	pt.CmethodsDone()
+	pt.SmethodsDone()
 
 	var numHandlers int = 0
 	var sig os.Signal
@@ -187,7 +173,7 @@ func main() {
 
 	if os.Getenv("TOR_PT_EXIT_ON_STDIN_CLOSE") == "1" {
 		go func() {
-			io.Copy(io.Discard, os.Stdin)
+			io.Copy(ioutil.Discard, os.Stdin)
 			sigChan <- syscall.SIGTERM
 		}()
 	}
